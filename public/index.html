@@ -40,14 +40,14 @@
     valueBinding="Todos.todosController.allAreDone"}}
 
   {{#collection contentBinding="Todos.todosController" tagName="ul" itemClassBinding="content.isDone"}}
-    {{view SC.Checkbox titleBinding="parentView.content.title"
-        valueBinding="parentView.content.isDone"}}
+    {{view SC.Checkbox titleBinding="content.title" valueBinding="content.isDone"}}
   {{/collection}}
   </script>
 
   <script src="//ajax.googleapis.com/ajax/libs/jquery/1.6.1/jquery.min.js"></script>
   <script>!window.jQuery && document.write(unescape('%3Cscript src="js/libs/jquery-1.6.1.min.js"%3E%3C/script%3E'))</script>
   <script src="js/libs/sproutcore-2.0.beta.3.min.js"></script>
+  <script src="js/libs/sproutcore-resource.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

@@ -1,20 +1,30 @@
 Todos = SC.Application.create();
 
-Todos.Todo = SC.Object.extend({
-  title: null,
-  isDone: false
+Todos.Todo = SC.Resource.define({
+  url: '/todos',
+  schema: {
+    id:     String,
+    title:  String,
+    isDone: Boolean
+  }
 });
 
-Todos.todosController = SC.ArrayProxy.create({
-  content: [],
+Todos.todosController = SC.ResourceCollection.create({
+  type: Todos.Todo,
 
   createTodo: function(title) {
-    var todo = Todos.Todo.create({ title: title });
-    this.pushObject(todo);
+    var todo = Todos.Todo.create({ title: title || '', isDone: false });
+    todo.save().done(function() {
+      Todos.todosController.pushObject(todo);
+    })
   },
 
   clearCompletedTodos: function() {
-    this.filterProperty('isDone', true).forEach(this.removeObject, this);
+    this.filterProperty('isDone', true).forEach(function(todo) {
+      todo.destroy().done(function() {
+        Todos.todosController.removeObject(todo);
+      })
+    });
   },
 
   remaining: function() {
@@ -51,4 +61,3 @@ Todos.CreateTodoView = SC.TextField.extend({
     }
   }
 });
-
