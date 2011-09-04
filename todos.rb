@@ -19,6 +19,10 @@ class Todos < Sinatra::Base
     }
   end
 
+  get '/' do
+    redirect to('/index.html')
+  end
+
   get '/todos' do
     content_type :json
     todos.find.map { |todo| todo_as_json(todo) }.to_json
