@@ -1,5 +1,7 @@
-This application shows how you can write SproutCore 2.0 apps with an astonishingly small amount of code.
+This is a modified version of the todo application that the SproutCore 2.0 Tutorial walks through.
 
-For more information about SproutCore, visit http://www.sproutcore.com.
+This is just serves as an example of how you can use sproutcore-resource, to integrate with JSON REST APIs.
 
-By Yehuda Katz and Tom Dale
+The application is deployed at http://sc-resource-todos.herokuapp.com
+
+For more information about sproutcore-resource, please visit: https://github.com/staugaard/sproutcore-resource
