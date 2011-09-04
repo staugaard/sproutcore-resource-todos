@@ -1,6 +1,6 @@
 This is a modified version of the todo application that the SproutCore 2.0 Tutorial walks through.
 
-This is just serves as an example of how you can use sproutcore-resource, to integrate with JSON REST APIs.
+This just serves as an example of how you can use sproutcore-resource to integrate with JSON REST APIs.
 
 The application is deployed at http://sc-resource-todos.herokuapp.com
 
