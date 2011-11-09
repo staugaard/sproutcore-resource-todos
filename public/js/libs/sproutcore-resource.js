@@ -1,8 +1,5 @@
 (function(undefined) {
-  var expandSchema, expandSchemaItem, propertyFunction,
-      createPropertyFunction, hasManyFunction, createSchemaProperties,
-      expandRemoteHasOneSchemaItem, expandRemoteHasManySchemaItem,
-      expandNestedHasOneSchemaItem, expandNestedHasManySchemaItem,
+  var expandSchema, expandSchemaItem, createSchemaProperties,
       mergeSchemas;
 
   function isString(obj) {
@@ -13,44 +10,723 @@
     return obj === Object(obj);
   }
 
-  var isFunction = $.isFunction;
-
   SC.Resource = SC.Object.extend({});
+
+  SC.Resource.deepSet = function(obj, path, value) {
+    if (SC.typeOf(path) === 'string') {
+      SC.Resource.deepSet(obj, path.split('.'), value);
+      return;
+    }
+
+    var key = path.shift();
+
+    if (path.length === 0) {
+      SC.set(obj, key, value);
+    } else {
+      var newObj = SC.get(obj, key);
+
+      if (newObj === null || newObj === undefined) {
+        newObj = {};
+        SC.set(obj, key, newObj);
+      }
+
+      SC.Resource.deepSet(newObj, path, value);
+    }
+  };
+
+  SC.Resource.deepMerge = function(objA, objB) {
+    var oldValue, newValue;
+
+    for (var key in objB) {
+      if (objB.hasOwnProperty(key)) {
+        oldValue = SC.get(objA, key);
+        newValue = SC.get(objB, key);
+
+        if (SC.typeOf(newValue) === 'object' && SC.typeOf(oldValue) === 'object') {
+          SC.Resource.deepMerge(oldValue, newValue);
+        } else {
+          SC.set(objA, key, newValue);
+        }
+      }
+    }
+  };
+
+  SC.Resource.AbstractSchemaItem = SC.Object.extend({
+    name: SC.required(String),
+    fetchable: SC.required(Boolean),
+    getValue: SC.required(Function),
+    setValue: SC.required(Function),
+
+    dependencies: function() {
+      return ['data.' + this.get('path'), 'isExpired'];
+    }.property('path'),
+
+    data: function(instance) {
+      return SC.get(instance, 'data');
+    },
+
+    type: function() {
+      var type = this.get('theType');
+      if (isString(type)) {
+        type = SC.getPath(type);
+        if (type) {
+          this.set('theType', type);
+        } else {
+          type = this.get('theType');
+        }
+      }
+      return type;
+    }.property('theType'),
+
+    propertyFunction: function(name, value) {
+      var schemaItem = this.constructor.schema[name];
+      if (arguments.length === 2) {
+        schemaItem.setValue.call(schemaItem, this, value);
+        value = schemaItem.getValue.call(schemaItem, this);
+      } else {
+        value = schemaItem.getValue.call(schemaItem, this);
+        if ((value === undefined || SC.get(this, 'isExpired')) && schemaItem.get('fetchable')) {
+          this.scheduleFetch();
+        }
+      }
+      return value;
+    },
+
+    property: function() {
+      return this.propertyFunction.property.apply(this.propertyFunction, this.get('dependencies')).cacheable();
+    }
+  });
+  SC.Resource.AbstractSchemaItem.reopenClass({
+    create: function(name, schema) {
+      var instance = this._super.apply(this);
+      instance.set('name', name);
+      return instance;
+    }
+  });
+
+
+  SC.Resource.SchemaItem = SC.Resource.AbstractSchemaItem.extend({});
+
+  SC.Resource.SchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+
+      var type;
+      if (definition === Number || definition === String || definition === Boolean || definition === Date || definition === Object) {
+        definition = {type: definition};
+        schema[name] = definition;
+      }
+
+      if(isObject(definition)) {
+        type = definition.type;
+      }
+
+      if (type) {
+        if (type.isSCResource || SC.typeOf(type) === 'string') { // a has-one association
+          return SC.Resource.HasOneSchemaItem.create(name, schema);
+        } else if(type.isSCResourceCollection) { // a has-many association
+          return SC.Resource.HasManySchemaItem.create(name, schema);
+        } else { // a regular attribute
+          return SC.Resource.AttributeSchemaItem.create(name, schema);
+        }
+      }
+    }
+  });
+
+  SC.Resource.AttributeSchemaItem = SC.Resource.AbstractSchemaItem.extend({
+    fetchable: true,
+    theType: Object,
+    path: SC.required(String),
+
+    getValue: function(instance) {
+      var value;
+      var data = this.data(instance);
+      if (data) {
+        value = SC.getPath(data, this.get('path'));
+      }
+
+      if (this.typeCast) {
+        value = this.typeCast(value);
+      }
+
+      return value;
+    },
+
+    setValue: function(instance, value) {
+      var data = this.data(instance);
+      if (!data) return;
+
+      if (this.typeCast) {
+        value = this.typeCast(value);
+      }
+      if (value !== null && value !== undefined && SC.typeOf(value.toJSON) == 'function') {
+        value = value.toJSON();
+      }
+      SC.Resource.deepSet(data, this.get('path'), value);
+    }
+  });
+
+  SC.Resource.AttributeSchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+      var instance;
+
+      if (this === SC.Resource.AttributeSchemaItem) {
+        switch (definition.type) {
+          case Number:
+            return SC.Resource.NumberAttributeSchemaItem.create(name, schema);
+          case String:
+            return SC.Resource.StringAttributeSchemaItem.create(name, schema);
+          case Boolean:
+            return SC.Resource.BooleanAttributeSchemaItem.create(name, schema);
+          case Date:
+            return SC.Resource.DateAttributeSchemaItem.create(name, schema);
+          default:
+            instance = this._super.apply(this, arguments);
+            instance.set('fetchable', name !== 'id');
+            instance.set('path', definition.path || name);
+            return instance;
+        }
+      }
+      else {
+        instance = this._super.apply(this, arguments);
+        instance.set('fetchable', name !== 'id');
+        instance.set('path', definition.path || name);
+        return instance;
+      }
+    }
+  });
+
+  SC.Resource.NumberAttributeSchemaItem = SC.Resource.AttributeSchemaItem.extend({
+    theType: Number,
+    typeCast: function(value) {
+      if (isNaN(value)) {
+        value = undefined;
+      }
+
+      if (value === undefined || value === null || SC.typeOf(value) === 'number') {
+        return value;
+      } else {
+        return Number(value);
+      }
+    }
+  });
+
+  SC.Resource.StringAttributeSchemaItem = SC.Resource.AttributeSchemaItem.extend({
+    theType: String,
+    typeCast: function(value) {
+      if (value === undefined || value === null || SC.typeOf(value) === 'string') {
+        return value;
+      } else {
+        return '' + value;
+      }
+    }
+  });
+
+  SC.Resource.BooleanAttributeSchemaItem = SC.Resource.AttributeSchemaItem.extend({
+    theType: Boolean,
+    typeCast: function(value) {
+      if (value === undefined || value === null || SC.typeOf(value) === 'boolean') {
+        return value;
+      } else {
+        return value === 'true';
+      }
+    }
+  });
+
+  SC.Resource.DateAttributeSchemaItem = SC.Resource.AttributeSchemaItem.extend({
+    theType: Date,
+    typeCast: function(value) {
+      if (value === undefined || value === null || SC.typeOf(value) === 'date') {
+        return value;
+      } else {
+        return new Date(value);
+      }
+    }
+  });
+
+  SC.Resource.HasOneSchemaItem = SC.Resource.AbstractSchemaItem.extend({
+    fetchable: true
+  });
+  SC.Resource.HasOneSchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+      if (this === SC.Resource.HasOneSchemaItem) {
+        if (definition.nested) {
+          return SC.Resource.HasOneNestedSchemaItem.create(name, schema);
+        } else {
+          return SC.Resource.HasOneRemoteSchemaItem.create(name, schema);
+        }
+      }
+      else {
+        var instance = this._super.apply(this, arguments);
+        instance.set('theType', definition.type);
+        if (definition.parse) {
+          instance.set('parse', definition.parse);
+        }
+        return instance;
+      }
+    }
+  });
+
+  SC.Resource.HasOneNestedSchemaItem = SC.Resource.HasOneSchemaItem.extend({
+    getValue: function(instance) {
+      var data = this.data(instance);
+      if (!data) return;
+      var type = this.get('type');
+      var value = SC.getPath(data, this.get('path'));
+      if (value) {
+        value = (this.get('parse') || type.parse).call(type, SC.copy(value));
+        return type.create({}, value);
+      }
+      return value;
+    },
+
+    setValue: function(instance, value) {
+      var data = this.data(instance);
+      if (!data) return;
+
+      if (value instanceof this.get('type')) {
+        value = SC.get(value, 'data');
+      }
+
+      SC.Resource.deepSet(data, this.get('path'), value);
+    }
+  });
+  SC.Resource.HasOneNestedSchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+      var instance = this._super.apply(this, arguments);
+      instance.set('path', definition.path || name);
+
+      var id_name = name + '_id';
+      if (!schema[id_name]) {
+        schema[id_name] = {type: Number, association: instance };
+        schema[id_name] = SC.Resource.HasOneNestedIdSchemaItem.create(id_name, schema);
+      }
+
+      return instance;
+    }
+  });
+  SC.Resource.HasOneNestedIdSchemaItem = SC.Resource.AbstractSchemaItem.extend({
+    fetchable: true,
+    theType: Number,
+    getValue: function(instance) {
+      return instance.getPath(this.get('path'));
+    },
+    setValue: function(instance, value) {
+      SC.set(instance, this.getPath('association.name'), {id: value});
+    }
+  });
+  SC.Resource.HasOneNestedIdSchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+      var instance = this._super.apply(this, arguments);
+      instance.set('association', definition.association);
+      instance.set('path', definition.association.get('path') + '.id');
+      return instance;
+    }
+  });
+
+
+  SC.Resource.HasOneRemoteSchemaItem = SC.Resource.HasOneSchemaItem.extend({
+    getValue: function(instance) {
+      var data = this.data(instance);
+      if (!data) return;
+      var id = SC.getPath(data, this.get('path'));
+      if (id) {
+        return this.get('type').create({}, {id: id});
+      }
+    },
+
+    setValue: function(instance, value) {
+      var data = this.data(instance);
+      if (!data) return;
+      var id = SC.get(value || {}, 'id');
+      SC.Resource.deepSet(data, this.get('path'), id);
+    }
+  });
+  SC.Resource.HasOneRemoteSchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+      var instance = this._super.apply(this, arguments);
+      var path = definition.path || name + '_id';
+      instance.set('path', path);
+
+      if (!schema[path]) {
+        schema[path] = Number;
+        schema[path] = SC.Resource.SchemaItem.create(path, schema);
+      }
+
+      return instance;
+    }
+  });
+
+
+  SC.Resource.HasManySchemaItem = SC.Resource.AbstractSchemaItem.extend({
+    itemType: function() {
+      var type = this.get('theItemType');
+      if (isString(type)) {
+        type = SC.getPath(type);
+        if (type) {
+          this.set('theItemType', type);
+        } else {
+          type = this.get('theItemType');
+        }
+      }
+      return type;
+    }.property('theItemType')
+  });
+  SC.Resource.HasManySchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+      if (this === SC.Resource.HasManySchemaItem) {
+        if (definition.url) {
+          return SC.Resource.HasManyRemoteSchemaItem.create(name, schema);
+        } else if (definition.nested) {
+          return SC.Resource.HasManyNestedSchemaItem.create(name, schema);
+        } else {
+          return SC.Resource.HasManyInArraySchemaItem.create(name, schema);
+        }
+      } else {
+        var instance = this._super.apply(this, arguments);
+        instance.set('theType', definition.type);
+        instance.set('theItemType', definition.itemType);
+        if (definition.parse) {
+          instance.set('parse', definition.parse);
+        }
+        return instance;
+      }
+    }
+  });
+
+  SC.Resource.HasManyRemoteSchemaItem = SC.Resource.HasManySchemaItem.extend({
+    fetchable: false,
+    dependencies: ['id', 'isInitializing'],
+    getValue: function(instance) {
+      if (SC.get(instance, 'isInitializing')) return;
+
+      var url = this.url(instance);
+      if (!url) return;
+
+      var options = {
+        type: this.get('itemType'),
+        url: url
+      };
+
+      if (this.get('parse')) options.parse = this.get('parse');
+
+      return this.get('type').create(options);
+    },
+
+    setValue: function(instance, value) {
+      throw('you can not set a remote has many association');
+    }
+  });
+  SC.Resource.HasManyRemoteSchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+
+      var instance = this._super.apply(this, arguments);
+
+      if (SC.typeOf(definition.url) === 'function') {
+        instance.url = definition.url;
+      } else {
+        instance.url = function(obj) {
+          var id = obj.get('id');
+          if (id) {
+            return definition.url.fmt(id);
+          }
+        };
+      }
+
+      return instance;
+    }
+  });
+
+  SC.Resource.HasManyNestedSchemaItem = SC.Resource.HasManySchemaItem.extend({
+    fetchable: true,
+    getValue: function(instance) {
+      var data = this.data(instance);
+      if (!data) return;
+      data = SC.getPath(data, this.get('path'));
+      if (data === undefined || data === null) return data;
+      data = SC.copy(data);
+
+      var options = {
+        type: this.get('itemType'),
+        content: data
+      };
+
+      if (this.get('parse')) options.parse = this.get('parse');
+
+      return this.get('type').create(options);
+    },
+
+    setValue: function(instance, value) {
+    }
+  });
+  SC.Resource.HasManyNestedSchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+
+      var instance = this._super.apply(this, arguments);
+      instance.set('path', definition.path || name);
+
+      return instance;
+    }
+  });
+
+  SC.Resource.HasManyInArraySchemaItem = SC.Resource.HasManySchemaItem.extend({
+    fetchable: true,
+    getValue: function(instance) {
+      var data = this.data(instance);
+      if (!data) return;
+      data = SC.getPath(data, this.get('path'));
+      if (data === undefined || data === null) return data;
+
+
+      return this.get('type').create({
+        type: this.get('itemType'),
+        content: data.map(function(id) { return {id: id}; })
+      });
+    },
+
+    setValue: function(instance, value) {
+    }
+  });
+  SC.Resource.HasManyInArraySchemaItem.reopenClass({
+    create: function(name, schema) {
+      var definition = schema[name];
+
+      var instance = this._super.apply(this, arguments);
+      instance.set('path', definition.path || name + '_ids');
+
+      return instance;
+    }
+  });
+
+
+  // Gives custom error handlers access to the resource object.
+  // 1. `this` will refer to the SC.Resource object.
+  // 2. `resource` will be passed as the last argument
+  //
+  //     function errorHandler() {
+  //       this; // the SC.Resource
+  //     }
+  //
+  //     function errorHandler(jqXHR, textStatus, errorThrown, resource) {
+  //       resource; // another way to reference the resource object
+  //     }
+  //
+  var errorHandlerWithModel = function(errorHandler, resource) {
+    return function() {
+      var args = Array.prototype.slice.call(arguments, 0);
+      args.push(resource);
+      errorHandler.apply(resource, args);
+    };
+  };
 
   SC.Resource.ajax = function(options) {
     options.dataType = options.dataType || 'json';
-    options.type     = options.type     || 'GET'
+    options.type     = options.type     || 'GET';
 
     if (!options.error && SC.Resource.errorHandler) {
-      options.error = SC.Resource.errorHandler;
+      if (options.resource) {
+        options.error = errorHandlerWithModel(SC.Resource.errorHandler, options.resource);
+        delete options.resource;
+      } else {
+        options.error = SC.Resource.errorHandler;
+      }
     }
 
     return $.ajax(options);
   };
 
+  SC.Resource.Lifecycle = {
+    INITIALIZING: 0,
+    UNFETCHED:    10,
+    EXPIRING:     20,
+    EXPIRED:      30,
+    FETCHING:     40,
+    FETCHED:      50,
+    SAVING:       60,
+    DESTOYING:    70,
+    DESTROYED:    80,
+
+    clock: SC.Object.create({
+      now: new Date(),
+
+      tick: function() {
+        SC.Resource.Lifecycle.clock.set('now', new Date());
+      },
+
+      start: function() {
+        this.stop();
+        SC.Resource.Lifecycle.clock.set('timer', setInterval(SC.Resource.Lifecycle.clock.tick, 10000));
+      },
+
+      stop: function() {
+        var timer = SC.Resource.Lifecycle.clock.get('timer');
+        if (timer) {
+          clearInterval(timer);
+        }
+      }
+    }),
+
+    classMixin: SC.Mixin.create({
+      create: function(options, data) {
+        options = options || {};
+        options.resourceState = SC.Resource.Lifecycle.INITIALIZING;
+
+        var instance = this._super.apply(this, arguments);
+
+        if (SC.get(instance, 'resourceState') === SC.Resource.Lifecycle.INITIALIZING) {
+          SC.set(instance, 'resourceState', SC.Resource.Lifecycle.UNFETCHED);
+        }
+
+        return instance;
+      }
+    }),
+
+    prototypeMixin: SC.Mixin.create({
+      expireIn: 60 * 5,
+      resourceState: 0,
+
+      init: function() {
+        this._super.apply(this, arguments);
+
+        var self = this;
+
+        var updateExpiry = function() {
+          var expireAt = new Date();
+          expireAt.setSeconds(expireAt.getSeconds() + SC.get(self, 'expireIn'));
+          SC.set(self, 'expireAt', expireAt);
+        };
+
+        SC.addListener(this, 'willFetch', this, function() {
+          SC.set(self, 'resourceState', SC.Resource.Lifecycle.FETCHING);
+          updateExpiry();
+        });
+
+        SC.addListener(this, 'didFetch', this, function() {
+          SC.set(self, 'resourceState', SC.Resource.Lifecycle.FETCHED);
+          updateExpiry();
+        });
+
+        var resourceStateBeforeSave;
+        SC.addListener(this, 'willSave', this, function() {
+          resourceStateBeforeSave = SC.get(self, 'resourceState');
+          SC.set(self, 'resourceState', SC.Resource.Lifecycle.SAVING);
+        });
+
+        SC.addListener(this, 'didSave', this, function() {
+          SC.set(self, 'resourceState', resourceStateBeforeSave || SC.Resource.Lifecycle.UNFETCHED);
+        });
+      },
+
+      isFetchable: function() {
+        var state = SC.get(this, 'resourceState');
+        return state == SC.Resource.Lifecycle.UNFETCHED || state === SC.Resource.Lifecycle.EXPIRED;
+      }.property('resourceState').cacheable(),
+
+      isInitializing: function() {
+        return (SC.get(this, 'resourceState') || SC.Resource.Lifecycle.INITIALIZING) === SC.Resource.Lifecycle.INITIALIZING;
+      }.property('resourceState').cacheable(),
+
+      isFetching: function() {
+        return (SC.get(this, 'resourceState')) === SC.Resource.Lifecycle.FETCHING;
+      }.property('resourceState').cacheable(),
+
+      isSavable: function() {
+        var state = SC.get(this, 'resourceState');
+        var unsavableState = [
+          SC.Resource.Lifecycle.INITIALIZING,
+          SC.Resource.Lifecycle.FETCHING,
+          SC.Resource.Lifecycle.SAVING,
+          SC.Resource.Lifecycle.DESTOYING
+        ];
+
+        return state && !unsavableState.contains(state);
+      }.property('resourceState').cacheable(),
+
+      scheduleFetch: function() {
+        if (SC.get(this, 'isFetchable')) {
+          SC.run.next(this, this.fetch);
+        }
+      },
+
+      expire: function() {
+        SC.run.next(this, function() {
+          SC.set(this, 'expireAt', new Date());
+          SC.Resource.Lifecycle.clock.tick();
+        });
+      },
+
+      updateIsExpired: function() {
+        var isExpired = SC.get(this, 'resourceState') === SC.Resource.Lifecycle.EXPIRED;
+        if (isExpired) return true;
+
+        var expireAt = SC.get(this, 'expireAt');
+        if (expireAt) {
+          var now = SC.Resource.Lifecycle.clock.get('now');
+          isExpired = expireAt.getTime() <= now.getTime();
+        }
+
+        if (isExpired !== SC.get(this, 'isExpired')) {
+          SC.set(this, 'isExpired', isExpired);
+        }
+      }.observes('SC.Resource.Lifecycle.clock.now', 'expireAt', 'resourceState'),
+
+      isExpired: function(name, value) {
+        if (value) {
+          SC.set(this, 'resourceState', SC.Resource.Lifecycle.EXPIRED);
+        }
+        return value;
+      }.property().cacheable()
+    })
+  };
+  SC.Resource.Lifecycle.clock.start();
+
   SC.Resource.reopen({
     isSCResource: true,
 
+    updateWithApiData: function(json) {
+      var data = SC.get(this, 'data');
+      SC.beginPropertyChanges(data);
+      SC.Resource.deepMerge(data, this.constructor.parse(json));
+      SC.endPropertyChanges(data);
+    },
+
+    willFetch: function() {},
+    didFetch: function() {},
+    willSave: function() {},
+    didSave: function() {},
+
     fetch: function() {
+      if (!SC.get(this, 'isFetchable')) return null;
+
       var url = this.resourceURL();
 
       if (!url) return;
 
-      SC.set(this, 'resourceState', SC.Resource.Lifecycle.FETCHING);
-
       var self = this;
 
-      if (this.deferedFetch) return this.deferedFetch;
+      if (this.deferedFetch && !SC.get(this, 'isExpired')) return this.deferedFetch;
+
+      self.willFetch.call(self);
+      SC.sendEvent(self, 'willFetch');
 
       this.deferedFetch = SC.Resource.ajax({
         url: url,
         success: function(json) {
-          self.setProperties(self.constructor.parse(json))
+          self.updateWithApiData(json);
         }
       });
 
       this.deferedFetch.always(function() {
-        SC.set(self, 'resourceState', SC.Resource.Lifecycle.FETCHED);
+        self.didFetch.call(self);
+        SC.sendEvent(self, 'didFetch');
       });
 
       return this.deferedFetch;
@@ -68,14 +744,17 @@
 
     isNew: function() {
       return !SC.get(this, 'id');
-    },
+    }.property('id').cacheable(),
 
     save: function() {
+      if (!SC.get(this, 'isSavable')) return false;
+
       var ajaxOptions = {
-        data: this.toJSON()
+        data: this.toJSON(),
+        resource: this
       };
 
-      if (this.isNew()) {
+      if (SC.get(this, 'isNew')) {
         ajaxOptions.type = 'POST';
         ajaxOptions.url = this.constructor.resourceURL();
       } else {
@@ -83,207 +762,53 @@
         ajaxOptions.url = this.resourceURL();
       }
 
-      return SC.Resource.ajax(ajaxOptions);
+      var self = this;
+
+      self.willSave.call(self);
+      SC.sendEvent(self, 'willSave');
+
+      var deferedSave = SC.Resource.ajax(ajaxOptions);
+
+      deferedSave.done(function(data, status, response) {
+        var location = response.getResponseHeader('Location');
+        if (location) {
+          var id = self.constructor.idFromURL(location);
+          if (id) {
+            SC.set(self, 'id', id);
+          }
+        }
+
+        if (SC.typeOf(data) === 'object') {
+          self.updateWithApiData(data);
+        }
+      });
+
+      deferedSave.always(function() {
+        self.didSave.call(self);
+        SC.sendEvent(self, 'didSave');
+      });
+
+      return deferedSave;
     },
 
     destroy: function() {
+      var previousState = SC.get(this, 'resourceState'), self = this;
+      SC.set(this, 'resourceState', SC.Resource.Lifecycle.DESTROYING);
       return SC.Resource.ajax({
         type: 'DELETE',
         url:  this.resourceURL()
+      }).done(function() {
+        SC.set(self, 'resourceState', SC.Resource.Lifecycle.DESTROYED);
+      }).fail(function() {
+        SC.set(self, 'resourceState', previousState);
       });
     }
-  });
-
-  SC.Resource.Lifecycle = {
-    INITIALIZING: 0,
-    UNFETCHED:    10,
-    FETCHING:     20,
-    FETCHED:      30,
-    create: function(options) {
-      options = options || {};
-      options.resourceState = SC.Resource.Lifecycle.INITIALIZING;
-      var instance = this._super.call(this, options);
-      if (SC.get(instance, 'resourceState') === SC.Resource.Lifecycle.INITIALIZING) {
-        SC.set(instance, 'resourceState', SC.Resource.Lifecycle.UNFETCHED);
-      }
-      return instance;
-    }
-  };
-
-  SC.Resource.reopenClass(SC.Resource.Lifecycle);
-
-  var resolveType = function(options, key) {
-    key = key || 'type';
-    if (isString(options[key])) {
-      options[key] = SC.getPath(options[key]);
-    }
-  };
-
-  expandNestedHasOneSchemaItem = function(name, schema) {
-    var value = schema[name];
-    value.path = value.path || name;
-
-    value.serialize = value.serialize || function(instance) {
-      if (instance === undefined || instance === null) return instance;
-
-      resolveType(value);
-
-      if (instance instanceof value.type) {
-        return SC.get(instance, 'data');
-      } else if (isObject(instance)) {
-        return instance
-      }
-    };
-
-    value.deserialize = value.deserialize || function(data) {
-      if (data === undefined || data === null) return data;
-
-      resolveType(value);
-
-      return value.type.create(data);
-    };
-  };
-
-  expandRemoteHasOneSchemaItem = function(name, schema) {
-    var value = schema[name];
-    value.path = value.path || name + '_id';
-    if (!schema[value.path]) {
-      schema[value.path] = Number;
-      expandSchemaItem(value.path, schema);
-    }
-
-    value.serialize = value.serialize || function(instance) {
-      if (instance === undefined || instance === null) return instance;
-
-      resolveType(value);
-
-      return SC.get(instance, 'id');
-    };
-
-    value.deserialize = value.deserialize || function(id) {
-      if (id === undefined || id === null) return id;
-
-      resolveType(value);
-
-      return value.type.create({id: id});
-    };
-  };
-
-  expandRemoteHasManySchemaItem = function(name, schema) {
-    var value = schema[name];
-
-    value.deserialize = value.deserialize || function(options) {
-      resolveType(value, 'itemType');
-
-      options.type = value.itemType;
-
-      return value.type.create(options);
-    };
-  };
-
-  expandNestedHasManySchemaItem = function(name, schema) {
-    var value = schema[name];
-    value.path = value.path || name;
-
-    value.serialize = value.serialize || function(instance) {
-      if (instance === undefined || instance === null) return instance;
-
-      resolveType(value, 'itemType');
-
-      var array;
-      if (instance instanceof SC.ResourceCollection) {
-        array = instance.get('content');
-      } else if (instance instanceof Array) {
-        array = instance;
-      }
-
-      if (array) {
-        return array.map(function(item) {
-          if (item instanceof value.itemType) {
-            return item.get('data');
-          } else if (isObject(item)) {
-            return item;
-          } else {
-            throw 'invalid item in collection';
-          }
-        });
-      }
-    };
-
-    value.deserialize = value.deserialize || function(data) {
-      resolveType(value, 'itemType');
-
-      return value.type.create({
-        content: data,
-        type: value.itemType,
-        parse: value.parse
-      });
-    };
-  };
-
-  expandSchemaItem = function(name, schema) {
-    var value = schema[name];
-
-    if (value === Number || value === String || value === Boolean || value === Date || value === Object) {
-      value = {type: value};
-      schema[name] = value;
-    }
-
-    if (isObject(value) && value.type) {
-
-      if (value.type.isSCResource || isString(value.type)) { // a has-one association
-        value.nested = !!value.nested;
-
-        if (value.nested) {
-          expandNestedHasOneSchemaItem(name, schema);
-        } else {
-          expandRemoteHasOneSchemaItem(name, schema);
-        }
-
-      } else if(value.type.isSCResourceCollection) { // a has-many association
-        if (value.url) {
-          expandRemoteHasManySchemaItem(name, schema);
-        } else if (value.nested) {
-          expandNestedHasManySchemaItem(name, schema);
-        }
-      } else { // a regular attribute
-        value.path = value.path || name;
-      }
-
-      var serialize, deserialize;
-      switch (value.type) {
-        case Number:
-          serialize = deserialize = function(v) { return v === undefined ? undefined : ( v === null ? null : Number(v) ); };
-          break;
-        case String:
-          serialize = deserialize = function(v) { return v === undefined ? undefined : ( v === null ? null : '' + v ); };
-          break;
-        case Boolean:
-          serialize = deserialize = function(v) { return v === true || v === 'true'; };
-          break;
-        case Date:
-          // TODO: We need to investigate how well Date#toJSON is supported in browsers
-          serialize = function(v) { return v === undefined ? undefined : ( v === null ? null : (new Date(v)).toJSON() ); };
-          deserialize = function(v) { return v === undefined ? undefined : ( v === null ? null : new Date(v) ); };
-          break;
-        case Object:
-          serialize = deserialize = function(v) { return v; };
-          break;
-      }
-
-      if (serialize) {
-        value.serialize   = value.serialize   || serialize;
-      }
-      if (deserialize) {
-        value.deserialize = value.deserialize || deserialize;
-      }
-    }
-  };
+  }, SC.Resource.Lifecycle.prototypeMixin);
 
   expandSchema = function(schema) {
     for (var name in schema) {
       if (schema.hasOwnProperty(name)) {
-        expandSchemaItem(name, schema);
+        schema[name] = SC.Resource.SchemaItem.create(name, schema);
       }
     }
 
@@ -306,65 +831,12 @@
     return schema;
   };
 
-  // the function for a given regular property
-  propertyFunction = function(name, value) {
-    var propertyOptions = this.constructor.schema[name];
-    var data = SC.get(this, 'data');
-
-    if (arguments.length === 1) { // getter
-      var serializedValue;
-      if (data) serializedValue = SC.getPath(data, propertyOptions.path);
-
-      if (serializedValue === undefined) {
-        SC.run.next(this, this.fetch);
-      }
-
-      value = propertyOptions.deserialize(serializedValue);
-    } else { // setter
-      var serialized = propertyOptions.serialize(value);
-
-      SC.setPath(data, propertyOptions.path, serialized);
-
-      value = propertyOptions.deserialize(serialized);
-    }
-
-    return value;
-  };
-
-  // Build a cumputed property function for a regular property.
-  createPropertyFunction = function(propertyOptions) {
-    return propertyFunction.property('data.' + propertyOptions.path).cacheable();
-  };
-
-  // The computed property function for a url based has-many association
-  hasManyFunction = function(name, value) {
-    if (arguments.length === 1) { // getter
-      var id = this.get('id');
-      if (!id) return undefined;
-
-      var propertyOptions = this.constructor.schema[name];
-      var options = SC.copy(propertyOptions);
-
-      if ($.isFunction(options.url)) {
-        options.url = options.url(this);
-      } else if ('string' === typeof options.url) {
-        options.url = options.url.fmt(id);
-      }
-
-      return propertyOptions.deserialize(options);
-    } else { // setter
-      // throw "You can not set this property";
-    }
-  }.property('data.id').cacheable();
-
   createSchemaProperties = function(schema) {
-    var properties = {}, propertyOptions;
+    var properties = {}, schemaItem;
 
     for (var propertyName in schema) {
       if (schema.hasOwnProperty(propertyName)) {
-        propertyOptions = schema[propertyName];
-        properties[propertyName] = propertyOptions.path ? createPropertyFunction(propertyOptions)
-                                                        : hasManyFunction;
+        properties[propertyName] = schema[propertyName].property();
       }
     }
 
@@ -375,24 +847,52 @@
     isSCResource: true,
     schema: {},
 
+    baseClass: function() {
+      if (this === SC.Resource) {
+        return null;
+      } else {
+        return this.baseResourceClass || this;
+      }
+    },
+
+    subclassFor: function(options, data) {
+      return this;
+    },
+
     // Create an instance of this resource. If `options` includes an
     // `id`, first check the identity map and return the existing resource
     // with that ID if found.
-    create: function(options) {
-      var instance;
-      if (options && options.id) {
-        var id = options.id.toString();
+    create: function(options, data) {
+      data    = data    || {};
+      options = options || {};
+
+      var klass = this.subclassFor(options, data);
+
+      if (klass === this) {
+        var instance;
         this.identityMap = this.identityMap || {};
-        instance = this.identityMap[id];
-        if (!instance) {
-          this.identityMap[id] = instance = this._super.call(this);
-          SC.set(instance, 'data', options);
+
+        var id = data.id || options.id;
+        if (id && !options.skipIdentityMap) {
+          id = id.toString();
+          instance = this.identityMap[id];
+
+          if (!instance) {
+            this.identityMap[id] = instance = this._super.call(this, { data: data });
+          } else {
+            instance.updateWithApiData(data);
+          }
+        } else {
+          instance = this._super.call(this, { data: data });
         }
+
+        delete options.data;
+        instance.setProperties(options);
+
+        return instance;
       } else {
-        instance = this._super.call(this);
-        SC.set(instance, 'data', options);
+        return klass.create(options, data);
       }
-      return instance;
     },
 
     // Parse JSON -- likely returned from an AJAX call -- into the
@@ -425,6 +925,10 @@
         schema: schema
       };
 
+      if (this !== SC.Resource) {
+        classOptions.baseResourceClass = this.baseClass() || this;
+      }
+
       if (options.url) {
         classOptions.url = options.url;
       }
@@ -439,72 +943,110 @@
     },
 
     resourceURL: function(instance) {
-      if ($.isFunction(this.url)) {
+      if (SC.typeOf(this.url) == 'function') {
         return this.url(instance);
-      } else {
+      } else if (this.url) {
         if (instance) {
           var id = SC.get(instance, 'id');
-          if (id) {
+          if (id && (SC.typeOf(id) !== 'number' || id > 0)) {
             return this.url + '/' + id;
           }
         } else {
           return this.url;
         }
       }
+    },
+
+    idFromURL: function(url) {
+      var regex;
+      if (!this.schema.id) return;
+
+      if (this.schema.id.get('type') === Number) {
+        regex = /\/(\d+)(\.\w+)?$/;
+      } else {
+        regex = /\/([^\/\.]+)(\.\w+)?$/;
+      }
+
+      var match = (url || '').match(regex);
+      if (match) {
+        return match[1];
+      }
     }
-  });
+  }, SC.Resource.Lifecycle.classMixin);
 
   SC.ResourceCollection = SC.ArrayProxy.extend({
     isSCResourceCollection: true,
-    type: SC.Required,
+    type: SC.required(),
     fetch: function() {
-      if (!this.prePopulated && SC.get(this, 'resourceState') === SC.Resource.Lifecycle.UNFETCHED) {
-        SC.set(this, 'resourceState', SC.Resource.Lifecycle.FETCHING);
+      if (!SC.get(this, 'isFetchable')) return;
+
+      if (!this.prePopulated) {
         var self = this;
 
+        if (this.deferedFetch && !SC.get(this, 'isExpired')) return this.deferedFetch;
+
+        SC.sendEvent(self, 'willFetch');
+
         this.deferedFetch = this._fetch(function(json) {
-          SC.set(self, 'content', self.instantiateItems(self.parse(json)));
+          SC.set(self, 'content', self.parse(json));
         });
 
         this.deferedFetch.always(function() {
-          SC.set(self, 'resourceState', SC.Resource.Lifecycle.FETCHED);
+          SC.sendEvent(self, 'didFetch');
         });
       }
       return this.deferedFetch;
     },
+    _resolveType: function() {
+      if (isString(this.type)) {
+        var type = SC.getPath(this.type);
+        if (type) this.type = type;
+      }
+    },
     _fetch: function(callback) {
+      this._resolveType();
       return SC.Resource.ajax({
         url: this.url || this.type.resourceURL(),
         success: callback
       });
     },
     instantiateItems: function(items) {
+      this._resolveType();
       return items.map(function(item) {
         if (item instanceof this.type) {
           return item;
         } else {
-          return this.type.create(item);
+          return this.type.create({}, item);
         }
       }, this);
     },
     parse: function(json) {
-      if (this.type.parse && typeof this.type.parse === 'function') {
+      this._resolveType();
+      if (SC.typeOf(this.type.parse) == 'function') {
         return json.map(this.type.parse);
       }
       else {
         return json;
       }
     },
+    length: function() {
+      var content = SC.get(this, 'content');
+      var length = content ? SC.get(content, 'length') : 0;
+      if (length === 0 ||  SC.get(this, 'isExpired'))  this.scheduleFetch();
+      return length;
+    }.property('content.length', 'resourceState', 'isExpired').cacheable(),
     content: function(name, value) {
-      if (arguments.length === 1) { // getter
-        SC.run.next(this, this.fetch);
-      } else { // setter
+      if (arguments.length === 2) { // setter
         return this.instantiateItems(value);
       }
-    }.property().cacheable()
-  });
+    }.property().cacheable(),
 
-  SC.ResourceCollection.reopenClass(SC.Resource.Lifecycle);
+    autoFetchOnExpiry: function() {
+      if (SC.get(this, 'isExpired') && SC.get(this, 'hasArrayObservers')) {
+        this.fetch();
+      }
+    }.observes('isExpired', 'hasArrayObservers')
+  }, SC.Resource.Lifecycle.prototypeMixin);
 
   SC.ResourceCollection.reopenClass({
     isSCResourceCollection: true,
@@ -520,7 +1062,7 @@
       if (!options.prePopulated && options.url) {
         this.identityMap = this.identityMap || {};
         var identity = [options.type, options.url];
-        instance = this.identityMap[identity] || this._super.call(this, options)
+        instance = this.identityMap[identity] || this._super.call(this, options);
         this.identityMap[identity] = instance;
       }
 
@@ -528,11 +1070,11 @@
         instance = this._super.call(this, options);
 
         if (content) {
-          SC.set(instance, 'content', content);
+          SC.set(instance, 'content', instance.parse(content));
         }
       }
 
       return instance;
     }
-  });
+  }, SC.Resource.Lifecycle.classMixin);
 }());
